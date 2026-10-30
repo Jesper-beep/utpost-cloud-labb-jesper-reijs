@@ -64,7 +64,7 @@ Allt som skiljer en miljö från en annan kommer från miljövariabler – se `.
 Staging kör i **Azure Container Apps** som en app med fyra containrar (`infra/azure/staging.yaml`). Skapa den en gång med `infra/azure/skapa-staging.sh`; därefter deployar pipelinen vid varje merge till `main` (jobbet *Deploy → Azure staging*, se `docs/pipeline.md`). Appen skalar till noll mellan passen: första anropet väcker den (räkna med en minut), och databaserna seedas om vid varje kallstart (`SEED_ON_START=1`). Beslutet och alternativen står i `docs/decisions/hosting.md`.
 
 ## Images
-Heeee
+Heeeedsds
 
 Pipelinen (jobbet *Image* i `.github/workflows/ci.yml`) bygger `api` och `client` på varje PR och publicerar dem i GHCR vid merge till `main`, taggade med commitens sha:
 
