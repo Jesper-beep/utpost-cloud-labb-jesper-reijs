@@ -1,0 +1,32 @@
+# nginx i client-imagen: skickar ut de byggda filerna och släpper igenom API-anropen.
+#
+# M6: det här är en MALL. nginx-imagen kör envsubst på den när containern startar och lägger
+# resultatet i /etc/nginx/conf.d/default.conf. ${API_UPSTREAM} byts mot miljövariabeln –
+# api:4000 i compose, localhost:4000 i Azure där api kör som sidecar i samma app.
+# nginx egna variabler ($uri, $host …) rörs inte: envsubst byter bara ut namn som finns i miljön.
+server {
+  listen 80;
+  root /usr/share/nginx/html;
+
+  # Vue Router sköter adresserna i browsern. /guider/kebnekaise finns inte som fil –
+  # hittas ingen fil skickas index.html, och routern tar det därifrån.
+  location / {
+    try_files $uri $uri/ /index.html;
+  }
+
+  # Filerna i assets/ har en hash i namnet (index-S-W114i7.js). Nytt bygge = nytt namn,
+  # så browsern får spara dem hur länge som helst.
+  location /assets/ {
+    expires 1y;
+    add_header Cache-Control "public, immutable";
+  }
+
+  # Browsern pratar bara med den här servern. Anrop till /api och /graphql skickas vidare
+  # till API:et – adressen kommer från miljön, inte från den här filen.
+  location /api/ {
+    proxy_pass http://${API_UPSTREAM};
+  }
+  location /graphql {
+    proxy_pass http://${API_UPSTREAM};
+  }
+}

@@ -1,0 +1,156 @@
+# Utpost – CI (M1, utbyggd i M4 och M5)
+# Varje PR mot main och varje push till main: lint, formatkontroll, typkontroll, tester och bygge.
+# Rött någonstans = PR:en får inte mergas (branch protection kräver "Kvalitet", "Bygg", "Integration" och "Image").
+# M4: jobbet Image bygger Docker-imagerna. På PR byggs de bara (går Dockerfilen igenom?),
+# på main byggs de och publiceras i GHCR, taggade med commitens sha.
+# M5: jobbet Integration kör API-testerna mot riktiga databaser som startas för jobbet (services).
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Minsta möjliga rättigheter för GITHUB_TOKEN – pipelinen behöver bara läsa repot.
+permissions:
+  contents: read
+
+# Ny push till samma PR avbryter den pågående körningen – sparar minuter i kön.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Kvalitet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm            # cachar ~/.npm nycklat på package-lock.json
+      - run: npm ci             # installerar ALLA workspaces (api, web, client) – exakt enligt lockfilen
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm run typecheck   # M2: vue-tsc i client/ och tsc i api/. M5: kör codegen först – schema → fråga → vy kontrolleras här
+      - run: npm test            # klientens tester (Vitest + Testing Library, API:et mockat)
+
+  # M5: integrationstester mot GraphQL-servern med riktig databas. Postgres och Mongo startas som
+  # services bredvid jobbet – samma images som i compose.yaml – och nås på localhost.
+  integration:
+    name: Integration
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: utpost
+          POSTGRES_PASSWORD: utpost
+          POSTGRES_DB: utpost
+        ports:
+          - 5432:5432              # i jobbet: localhost:5432 (inte 5433 som på din dator)
+        options: >-
+          --health-cmd "pg_isready -U utpost -d utpost"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      mongo:
+        image: mongo:8.2
+        env:
+          MONGO_INITDB_ROOT_USERNAME: utpost
+          MONGO_INITDB_ROOT_PASSWORD: utpost
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok'"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      # Samma variabler som compose sätter för api – men här är databaserna på localhost.
+      DATABASE_URL: postgres://utpost:utpost@localhost:5432/utpost
+      MONGO_URL: mongodb://utpost:utpost@localhost:27017/utpost?authSource=admin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run seed          # tom databas → testdata, exakt som lokalt
+      - run: npm run migrate:logs  # mätpunkterna till Mongo – testet för Tour.logs kräver det
+      - run: npm run test:api
+
+  build:
+    name: Bygg
+    runs-on: ubuntu-latest     # körs parallellt med quality – de behöver inte varandra
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: client-dist
+          path: client/dist
+          retention-days: 7
+
+  image:
+    name: Image
+    runs-on: ubuntu-latest
+    needs: [quality, build]    # ingen image av kod som inte klarat kontrollerna
+    permissions:
+      contents: read
+      packages: write          # GITHUB_TOKEN får publicera i GHCR – bara i det här jobbet
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      # Inloggning behövs bara när vi ska publicera, alltså på main.
+      - uses: docker/login-action@v3
+        if: github.event_name == 'push'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Räknar ut namn och taggar: ghcr.io/<ägare>/<repo>-api:sha-1a2b3c4 och :latest på main.
+      # (metadata-action gör också namnet till gemener, vilket GHCR kräver.)
+      - id: meta-api
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}-api
+          tags: |
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .                   # repots rot, som i compose.yaml
+          file: api/Dockerfile
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta-api.outputs.tags }}
+          labels: ${{ steps.meta-api.outputs.labels }}
+          build-args: GIT_SHA=${{ github.sha }}   # M6: syns i /api/health – deploysteget väntar på den
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+
+      - id: meta-client
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}-client
+          tags: |
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: client/Dockerfile
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta-client.outputs.tags }}
+          labels: ${{ steps.meta-client.outputs.labels }}
+          cache-from: type=gha,scope=client
+          cache-to: type=gha,mode=max,scope=client

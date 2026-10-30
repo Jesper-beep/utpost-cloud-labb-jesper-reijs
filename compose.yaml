@@ -1,0 +1,67 @@
+# Hela Utpost lokalt med ett kommando:  docker compose up --build
+# Bara databaserna (och appen med npm run dev på din dator):  docker compose up -d postgres mongo
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: utpost
+      POSTGRES_PASSWORD: utpost
+      POSTGRES_DB: utpost
+    ports:
+      - "5433:5432" # på värden: 5433, så att npm run dev:api utanför Docker fortfarande fungerar
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck: # api väntar tills det här säger ok – annars startar API:et innan databasen svarar
+      test: ["CMD-SHELL", "pg_isready -U utpost -d utpost"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  mongo:
+    image: mongo:8.2 # låst till 8.2: taggarna 8, 8.0 och latest vägrar starta på ny Docker Desktop (Linux-kärna 6.19+, SERVER-121912)
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: utpost
+      MONGO_INITDB_ROOT_PASSWORD: utpost
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodata:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: . # repots rot, inte api/ – Dockerfilen kopierar shared/ också
+      dockerfile: api/Dockerfile
+    environment:
+      # Inne i compose-nätverket heter databaserna som tjänsterna: postgres och mongo, inte localhost.
+      # Portarna är containrarnas egna (5432), inte de publicerade (5433).
+      DATABASE_URL: postgres://utpost:utpost@postgres:5432/utpost
+      MONGO_URL: mongodb://utpost:utpost@mongo:27017/utpost?authSource=admin
+      JWT_SECRET: utpost-dev-secret-byt-i-molnet # M6: lokalt värde. I molnet: en secret i plattformen, aldrig i en fil som committas
+      SEED_ON_START: '1' # M6: tom databas vid start → seed + migrate:logs. Lokalt: harmlöst, seedar bara om users är tom
+    # Inga ports: browsern når API:et genom nginx i client (/api och /graphql skickas vidare
+    # till api:4000 inne i nätverket). Felsöka API:et direkt? Lägg tillbaka  ports: - "4000:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+
+  client:
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    environment:
+      API_UPSTREAM: api:4000 # M6: vart nginx skickar /api och /graphql. I Azure (sidecars i samma app): localhost:4000
+    ports:
+      - "3001:80" # nginx lyssnar på 80 i containern
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+  mongodata:
